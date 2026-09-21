@@ -1,9 +1,14 @@
+import { mkdir } from "node:fs/promises"
+import { join } from "node:path"
+import { UploadService } from "./application/upload-service.js"
 import { loadConfig } from "./config/config.js"
 import type { Config } from "./config/config.js"
 import { createApp } from "./http/app.js"
+import { CasObjectStore } from "./infrastructure/storage/cas-object-store.js"
 
-// Entrypoint. Manual DI: assemble config + app, then listen. Fails fast when
-// the environment is invalid so a broken container never serves traffic.
+// Entrypoint. Manual DI: assemble config + storage + services, then listen.
+// Fails fast when the environment is invalid so a broken container never
+// serves traffic.
 const loadConfigOrExit = (): Config => {
   try {
     return loadConfig()
@@ -13,9 +18,17 @@ const loadConfigOrExit = (): Config => {
   }
 }
 
-const main = (): void => {
+const main = async (): Promise<void> => {
   const config = loadConfigOrExit()
-  const app = createApp(config)
+  const originalsDir = join(config.storageDir, "originals")
+  const tmpDir = join(config.storageDir, "tmp")
+
+  // tmp lives on the same filesystem as originals — required for atomic rename.
+  await mkdir(tmpDir, { recursive: true })
+
+  const objects = new CasObjectStore(originalsDir, tmpDir)
+  const uploads = new UploadService(objects, config.maxUploadSizeBytes)
+  const app = createApp(config, uploads)
 
   const server = app.listen(config.port, () => {
     console.log(`AssetMesh ready on http://localhost:${config.port}`)
@@ -31,4 +44,7 @@ const main = (): void => {
   process.on("SIGTERM", () => shutdown("SIGTERM"))
 }
 
-void main()
+void main().catch((err: unknown) => {
+  console.error(`[boot] ${err instanceof Error ? err.message : String(err)}`)
+  process.exit(1)
+})
