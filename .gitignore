@@ -1,4 +1,12 @@
 .opencode/
 docs/
 
-AGENT.md
+AGENTS.md
+opencode.json
+
+node_modules/
+dist/
+data/
+.env
+.env.*
+!.env.example
