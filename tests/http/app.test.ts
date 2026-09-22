@@ -4,8 +4,10 @@ import { mkdtemp, mkdir, readFile, readdir, rm } from "node:fs/promises"
 import type { Server } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { Readable } from "node:stream"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { FetchService } from "../../src/application/fetch-service.js"
+import type { TransformService } from "../../src/application/transform-service.js"
 import { UploadService } from "../../src/application/upload-service.js"
 import type { Config } from "../../src/config/config.js"
 import type { ObjectRepository, ReadableSource } from "../../src/domain/objects.js"
@@ -35,7 +37,11 @@ const servers: Server[] = []
 const roots: string[] = []
 const inflight = new Set<Promise<unknown>>()
 
-const start = async (opts: { maxBytes?: number; repo?: ObjectRepository } = {}): Promise<{
+const start = async (opts: {
+  maxBytes?: number
+  repo?: ObjectRepository
+  transforms?: { resolve: ReturnType<typeof vi.fn> }
+} = {}): Promise<{
   baseUrl: string
   root: string
 }> => {
@@ -67,7 +73,11 @@ const start = async (opts: { maxBytes?: number; repo?: ObjectRepository } = {}):
     read: (file, range) => underlying.read(file, range),
   }
   const uploads = new UploadService(repo, config.maxUploadSizeBytes)
-  const fetches = new FetchService(repo)
+  const fetches = new FetchService(
+    repo,
+    (opts.transforms ?? { resolve: vi.fn() }) as unknown as TransformService,
+    ["jpg", "png", "webp", "avif"],
+  )
   const app = createApp(config, uploads, fetches)
   const server = app.listen(0)
   servers.push(server)
@@ -238,5 +248,29 @@ describe("POST /api/v1/upload", () => {
       leftover = (await readdir(tmpDir).catch(() => [])).length
     }
     expect(leftover).toBe(0)
+  })
+})
+
+describe("GET /media/:id — JIT transform through the full app (M3)", () => {
+  it("serves a variant with the pipeline's headers and body bytes", async () => {
+    const payload = randomBytes(32)
+    const transforms = {
+      resolve: vi.fn(async () => ({
+        headers: { "Content-Type": "image/avif", "Content-Length": String(payload.length) },
+        stream: Readable.from([payload]),
+      })),
+    }
+    const { baseUrl } = await start({ transforms, maxBytes: 1024 })
+    const uploadRes = await uploadFile(baseUrl, PNG_BYTES)
+    expect(uploadRes.status).toBe(200)
+    const { id } = (await uploadRes.json()) as { id: string }
+
+    const res = await fetch(`${baseUrl}/media/${id}?w=300&fmt=avif`)
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toBe("image/avif")
+    expect(res.headers.get("content-length")).toBe(String(payload.length))
+    expect(Buffer.from(await res.arrayBuffer()).equals(payload)).toBe(true)
+    expect(transforms.resolve).toHaveBeenCalledTimes(1)
   })
 })

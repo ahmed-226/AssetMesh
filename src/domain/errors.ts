@@ -23,6 +23,12 @@ export class NotFoundError extends AppError {
   }
 }
 
+export class ServiceUnavailableError extends AppError {
+  constructor(message: string) {
+    super(503, message)
+  }
+}
+
 export class BadRequestError extends AppError {
   constructor(message: string) {
     super(400, message)

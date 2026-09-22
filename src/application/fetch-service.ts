@@ -2,6 +2,8 @@ import type { Readable } from "node:stream"
 import { validateHash } from "../domain/objects.js"
 import type { ObjectRepository } from "../domain/objects.js"
 import { parseRange } from "../domain/range.js"
+import { TransformOptions } from "../domain/transform-options.js"
+import type { TransformService } from "./transform-service.js"
 
 export interface FetchResult {
   status: number
@@ -10,14 +12,34 @@ export interface FetchResult {
 }
 
 // Use-case orchestration only: gate the id, open the original blob, and shape
-// the HTTP answer from the parsed Range. The stream is produced by the
-// repository and piped verbatim by the http layer — nothing is buffered.
+// the HTTP answer from the parsed Range. Transforms (M3) short-circuit to the
+// JIT pipeline when the query carries any option; byte-ranges apply to originals.
+// The stream is produced by the repository and piped verbatim by the http layer
+// — nothing is buffered.
 export class FetchService {
-  constructor(private readonly objects: ObjectRepository) {}
+  constructor(
+    private readonly objects: ObjectRepository,
+    private readonly transforms: TransformService,
+    private readonly allowedFormats: readonly string[],
+  ) {}
 
-  async fetch(id: string, rangeHeader: string | undefined): Promise<FetchResult> {
+  async fetch(
+    id: string,
+    rangeHeader: string | undefined,
+    query: Record<string, string | undefined> = {},
+  ): Promise<FetchResult> {
     validateHash(id)
     const file = await this.objects.open(id)
+    const options = TransformOptions.parse(query, this.allowedFormats)
+
+    if (options.hasOptions) {
+      // A transform request serves the whole variant; Range is ignored for
+      // generated output (originals only). Invalid options already threw 400
+      // during parse.
+      const { headers, stream } = await this.transforms.resolve(id, file, options)
+      return { status: 200, headers, stream }
+    }
+
     const range = parseRange(rangeHeader, file.size)
 
     if (range === "invalid") {

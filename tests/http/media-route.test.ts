@@ -4,8 +4,10 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import type { Server } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { Readable } from "node:stream"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { FetchService } from "../../src/application/fetch-service.js"
+import type { TransformService } from "../../src/application/transform-service.js"
 import { UploadService } from "../../src/application/upload-service.js"
 import type { Config } from "../../src/config/config.js"
 import type { ObjectRepository, ReadableSource } from "../../src/domain/objects.js"
@@ -26,7 +28,16 @@ const servers: Server[] = []
 const roots: string[] = []
 const inflight = new Set<Promise<unknown>>()
 
-const start = async (): Promise<{ baseUrl: string; root: string }> => {
+interface FakeTransforms {
+  resolve: ReturnType<typeof vi.fn>
+}
+
+// The default spy is never invoked by the no-option/range cases; the variant
+// tests inject their own implementation. Since src/ isn't typechecked from
+// tests/, the cast only documents intent.
+const start = async (
+  opts: { transforms?: FakeTransforms } = {},
+): Promise<{ baseUrl: string; root: string; transforms: FakeTransforms }> => {
   const root = await mkdtemp(join(tmpdir(), "assetmesh-media-"))
   roots.push(root)
   await mkdir(join(root, "tmp"), { recursive: true })
@@ -53,15 +64,20 @@ const start = async (): Promise<{ baseUrl: string; root: string }> => {
     open: (id) => underlying.open(id),
     read: (file, range) => underlying.read(file, range),
   }
+  const transforms = opts.transforms ?? { resolve: vi.fn() }
   const uploads = new UploadService(repo, config.maxUploadSizeBytes)
-  const fetches = new FetchService(repo)
+  const fetches = new FetchService(
+    repo,
+    transforms as unknown as TransformService,
+    ["jpg", "png", "webp", "avif"],
+  )
   const app = createApp(config, uploads, fetches)
   const server = app.listen(0)
   servers.push(server)
   await once(server, "listening")
   const address = server.address()
   if (address === null || typeof address === "string") throw new Error("expected a TCP port")
-  return { baseUrl: `http://127.0.0.1:${address.port}`, root }
+  return { baseUrl: `http://127.0.0.1:${address.port}`, root, transforms }
 }
 
 afterEach(async () => {
@@ -218,5 +234,36 @@ describe("GET /media/:id — full and range requests over HTTP", () => {
       join(root, "originals", id.slice(0, 2), id.slice(2, 4), `${id}.png`),
     )
     expect(onDisk.equals(PNG_BYTES)).toBe(true)
+  })
+
+  it("serves a JIT-transformed variant (200) with the pipeline's headers and exact bytes", async () => {
+    const payload = randomBytes(48)
+    const transforms = {
+      resolve: vi.fn(async () => ({
+        headers: { "Content-Type": "image/webp", "Content-Length": String(payload.length) },
+        stream: Readable.from([payload]),
+      })),
+    }
+    const { baseUrl } = await start({ transforms })
+    const id = await upload(baseUrl, PNG_BYTES, "a.png", "image/png")
+
+    const res = await fetch(`${baseUrl}/media/${id}?w=300&fmt=webp`)
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type")).toBe("image/webp")
+    expect(res.headers.get("content-length")).toBe(String(payload.length))
+    expect(Buffer.from(await res.arrayBuffer()).equals(payload)).toBe(true)
+    expect(transforms.resolve).toHaveBeenCalledTimes(1)
+  })
+
+  it("answers invalid transform options with 400 JSON and never consults the pipeline", async () => {
+    const { baseUrl, transforms } = await start()
+    const id = await upload(baseUrl, PNG_BYTES, "a.png", "image/png")
+
+    const res = await fetch(`${baseUrl}/media/${id}?w=abc`)
+
+    expect(res.status).toBe(400)
+    await expect(res.json()).resolves.toEqual({ error: expect.stringContaining("invalid w") })
+    expect(transforms.resolve).not.toHaveBeenCalled()
   })
 })

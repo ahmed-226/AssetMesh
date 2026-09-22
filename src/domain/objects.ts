@@ -27,6 +27,7 @@ export interface StoredObject {
 export interface StoredFile {
   path: string
   size: number
+  extension: string
   mimeType: string
 }
 

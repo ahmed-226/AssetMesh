@@ -3,10 +3,12 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Readable } from "node:stream"
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { FetchService } from "../../src/application/fetch-service.js"
+import type { TransformService } from "../../src/application/transform-service.js"
 import { BadRequestError, NotFoundError } from "../../src/domain/errors.js"
-import type { ReadableSource } from "../../src/domain/objects.js"
+import type { ReadableSource, StoredFile } from "../../src/domain/objects.js"
+import type { TransformOptions } from "../../src/domain/transform-options.js"
 import { CasObjectStore } from "../../src/infrastructure/storage/cas-object-store.js"
 
 const collect = async (stream: NodeJS.ReadableStream | null): Promise<Buffer> => {
@@ -31,12 +33,20 @@ describe("FetchService", () => {
   let fetches: FetchService
   let id: string
   let size: number
+  let transforms: { resolve: ReturnType<typeof vi.fn> }
 
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "assetmesh-fetch-"))
     await mkdir(join(root, "tmp"), { recursive: true })
     store = new CasObjectStore(join(root, "originals"), join(root, "tmp"))
-    fetches = new FetchService(store)
+    // Spy only — the no-option byte-range path must never touch it. Asserting
+    // call counts proves the query-option branch is the only entry point.
+    transforms = { resolve: vi.fn() }
+    fetches = new FetchService(
+      store,
+      transforms as unknown as TransformService,
+      ["jpg", "png", "webp", "avif"],
+    )
     const stored = await store.store(truncatableSource([PNG_BYTES]), 0)
     id = stored.id
     size = stored.size
@@ -116,5 +126,48 @@ describe("FetchService", () => {
     expect(result.status).toBe(206)
     expect(result.headers["Content-Range"]).toBe(`bytes 0-${size - 1}/${size}`)
     expect(await collect(result.stream)).toEqual(PNG_BYTES)
+  })
+
+  it("routes a request with options to the transform pipeline and returns its stream", async () => {
+    const payload = randomBytes(64)
+    transforms.resolve.mockResolvedValue({
+      headers: { "Content-Type": "image/webp", "Content-Length": String(payload.length) },
+      stream: Readable.from([payload]),
+    })
+
+    const result = await fetches.fetch(id, undefined, { w: "300", fmt: "webp" })
+
+    expect(result.status).toBe(200)
+    expect(transforms.resolve).toHaveBeenCalledTimes(1)
+    const [calledId, file, options] = transforms.resolve.mock.calls[0] as unknown as [
+      string,
+      StoredFile,
+      TransformOptions,
+    ]
+    expect(calledId).toBe(id)
+    expect(file.path).toContain(join("originals", id.slice(0, 2)))
+    expect(options.width).toBe(300)
+    expect(options.fmt).toBe("webp")
+    expect(result.headers["Content-Type"]).toBe("image/webp")
+    expect(await collect(result.stream)).toEqual(payload)
+  })
+
+  it("serves the original when the query carries no options (pipeline untouched)", async () => {
+    const result = await fetches.fetch(id, undefined, {})
+
+    expect(result.status).toBe(200)
+    expect(transforms.resolve).not.toHaveBeenCalled()
+    expect(result.headers["Content-Type"]).toBe("image/png")
+    expect(await collect(result.stream)).toEqual(PNG_BYTES)
+  })
+
+  it("rejects invalid transform options with BadRequestError (400)", async () => {
+    await expect(fetches.fetch(id, undefined, { w: "abc" })).rejects.toBeInstanceOf(
+      BadRequestError,
+    )
+    await expect(fetches.fetch(id, undefined, { w: "abc" })).rejects.toMatchObject({
+      statusCode: 400,
+    })
+    expect(transforms.resolve).not.toHaveBeenCalled() // parse threw before the pipeline
   })
 })

@@ -17,6 +17,8 @@ export const errorMapper = (
     return
   }
   if (err instanceof AppError) {
+    // A saturated image-worker queue back-pressures the client to retry later.
+    if (err.statusCode === 503) res.setHeader("Retry-After", "10")
     res.status(err.statusCode).json({ error: err.message })
     return
   }
