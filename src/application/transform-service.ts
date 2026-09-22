@@ -7,6 +7,7 @@ import { BadRequestError, ServiceUnavailableError } from "../domain/errors.js"
 import type { StoredFile } from "../domain/objects.js"
 import { mimeForFormat, TransformOptions } from "../domain/transform-options.js"
 import type { DiskCacheStore } from "../infrastructure/cache/disk-cache-store.js"
+import type { LruIndex } from "../infrastructure/cache/lru-index.js"
 import type { WorkerPoolProcessor } from "../infrastructure/image/worker-pool-processor.js"
 
 export interface VariantResult {
@@ -17,12 +18,15 @@ export interface VariantResult {
 // Use-case orchestration for on-the-fly transforms. Resolves a canonical cache
 // key, serves a hit, otherwise coordinates exactly one generation job.
 // Identical concurrent misses coalesce onto the same in-flight promise; failed
-// jobs are dropped from the map so errors are never cached.
+// jobs are dropped from the map so errors are never cached. The LRU index is
+// bookkeeping only — it never gates a request (a stale/missing entry just
+// gets re-touched or rebuilt).
 export class TransformService {
   private readonly inflight = new Map<string, Promise<void>>()
 
   constructor(
     private readonly cache: DiskCacheStore,
+    private readonly index: LruIndex,
     private readonly pool: WorkerPoolProcessor,
     private readonly tmpDir: string,
   ) {}
@@ -34,11 +38,13 @@ export class TransformService {
 
     if (await this.cache.exists(key)) {
       const { stream, size } = await this.cache.open(key)
+      this.index.touch(key.basename, size)
       return { headers: this.variantHeaders(fmt, size), stream }
     }
 
     await this.generate(key, file.path, options, fmt)
     const { stream, size } = await this.cache.open(key)
+    this.index.touch(key.basename, size)
     return { headers: this.variantHeaders(fmt, size), stream }
   }
 

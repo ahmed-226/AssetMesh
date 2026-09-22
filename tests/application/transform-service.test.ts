@@ -10,6 +10,7 @@ import { BadRequestError, ServiceUnavailableError } from "../../src/domain/error
 import type { StoredFile } from "../../src/domain/objects.js"
 import { TransformOptions } from "../../src/domain/transform-options.js"
 import { DiskCacheStore } from "../../src/infrastructure/cache/disk-cache-store.js"
+import { LruIndex } from "../../src/infrastructure/cache/lru-index.js"
 import type {
   TransformOutcome,
   TransformRequest,
@@ -65,6 +66,7 @@ describe("TransformService", () => {
   let root: string
   let tmpDir: string
   let cache: DiskCacheStore
+  let index: LruIndex
   let pool: FakePool
   let service: TransformService
 
@@ -76,8 +78,10 @@ describe("TransformService", () => {
     tmpDir = join(root, "tmp")
     await mkdir(tmpDir, { recursive: true })
     cache = new DiskCacheStore(join(root, "cache"))
+    // Never persisted/loaded in this suite — touch/save-only bookkeeping.
+    index = new LruIndex(join(root, "cache", "index.json"))
     pool = makePool(writingWorker)
-    service = new TransformService(cache, asPool(pool), tmpDir)
+    service = new TransformService(cache, index, asPool(pool), tmpDir)
   })
 
   afterEach(async () => {
@@ -104,17 +108,31 @@ describe("TransformService", () => {
     expect(result.headers["Content-Type"]).toBe("image/webp")
     expect(result.headers["Content-Length"]).toBe(String(VARIANT_BYTES.length))
     expect(await readAll(result.stream)).toEqual(VARIANT_BYTES)
+
+    // a miss touches the LRU index once with the stored variant's size
+    expect(index.count).toBe(1)
+    expect(index.totalSize).toBe(VARIANT_BYTES.length)
+    expect(index.lastAccessedAt(key.basename)).toBeGreaterThan(0)
   })
 
   it("hit: a second resolve with identical options is served from cache — pool not invoked again", async () => {
     const options = parse({ w: "300", fmt: "webp" })
+    const key = CacheKey.create(ID, options, "webp")
 
     await readAll((await service.resolve(ID, FILE, options)).stream)
+    const touchedAfterMiss = index.lastAccessedAt(key.basename)
+    expect(index.count).toBe(1)
+
     const again = await service.resolve(ID, FILE, options)
 
     expect(pool.transform).toHaveBeenCalledTimes(1)
     expect(await readAll(again.stream)).toEqual(VARIANT_BYTES)
     expect(again.headers["Content-Length"]).toBe(String(VARIANT_BYTES.length))
+
+    // a hit re-touches the existing entry instead of adding a duplicate
+    expect(index.count).toBe(1)
+    expect(index.totalSize).toBe(VARIANT_BYTES.length)
+    expect(index.lastAccessedAt(key.basename)).toBeGreaterThanOrEqual(touchedAfterMiss ?? 0)
   })
 
   it("coalesces concurrent identical misses onto one generation job", async () => {
@@ -125,7 +143,7 @@ describe("TransformService", () => {
       await writeFile(req.tmpPath, VARIANT_BYTES)
       return OK_OUTCOME
     })
-    service = new TransformService(cache, asPool(pool), tmpDir)
+    service = new TransformService(cache, index, asPool(pool), tmpDir)
     const options = parse({ w: "300", fmt: "webp" })
 
     const [first, second] = await Promise.all([
@@ -140,7 +158,7 @@ describe("TransformService", () => {
 
   it("maps a NOT_IMAGE worker outcome to BadRequestError 400 and leaves no tmp artifacts", async () => {
     pool = makePool(async () => ({ ok: false, code: "NOT_IMAGE", message: "not an image" }))
-    service = new TransformService(cache, asPool(pool), tmpDir)
+    service = new TransformService(cache, index, asPool(pool), tmpDir)
 
     await expect(service.resolve(ID, FILE, parse({ w: "300", fmt: "webp" }))).rejects.toBeInstanceOf(
       BadRequestError,
@@ -155,7 +173,7 @@ describe("TransformService", () => {
     pool = makePool(async () => {
       throw new ServiceUnavailableError("image worker queue is full")
     })
-    service = new TransformService(cache, asPool(pool), tmpDir)
+    service = new TransformService(cache, index, asPool(pool), tmpDir)
 
     await expect(service.resolve(ID, FILE, parse({ w: "300" }))).rejects.toBeInstanceOf(
       ServiceUnavailableError,
