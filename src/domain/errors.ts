@@ -17,6 +17,12 @@ export class PayloadTooLargeError extends AppError {
   }
 }
 
+export class NotFoundError extends AppError {
+  constructor(message: string) {
+    super(404, message)
+  }
+}
+
 export class BadRequestError extends AppError {
   constructor(message: string) {
     super(400, message)

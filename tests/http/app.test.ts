@@ -5,6 +5,7 @@ import type { Server } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
+import { FetchService } from "../../src/application/fetch-service.js"
 import { UploadService } from "../../src/application/upload-service.js"
 import type { Config } from "../../src/config/config.js"
 import type { ObjectRepository, ReadableSource } from "../../src/domain/objects.js"
@@ -62,9 +63,12 @@ const start = async (opts: { maxBytes?: number; repo?: ObjectRepository } = {}):
         inflight.delete(work)
       }
     },
+    open: (id) => underlying.open(id),
+    read: (file, range) => underlying.read(file, range),
   }
   const uploads = new UploadService(repo, config.maxUploadSizeBytes)
-  const app = createApp(config, uploads)
+  const fetches = new FetchService(repo)
+  const app = createApp(config, uploads, fetches)
   const server = app.listen(0)
   servers.push(server)
   await once(server, "listening")
@@ -220,6 +224,9 @@ describe("POST /api/v1/upload", () => {
     req.write(payload.subarray(0, payload.length / 2))
     // Give the server a moment to open the temp file, then sever the socket.
     await new Promise((r) => setTimeout(r, 50))
+    // Swallow the ECONNRESET on this side so it doesn't surface as an
+    // uncaught exception in the runner.
+    req.on("error", () => {})
     req.destroy()
 
     // The stream-reviewer bug: a hard abort previously left the partial file in

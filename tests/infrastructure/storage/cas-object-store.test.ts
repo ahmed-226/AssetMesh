@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto"
-import { access, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Readable } from "node:stream"
@@ -8,6 +8,18 @@ import type { ReadableSource } from "../../../src/domain/objects.js"
 import { CasObjectStore } from "../../../src/infrastructure/storage/cas-object-store.js"
 
 const sha256 = (b: Buffer): string => createHash("sha256").update(b).digest("hex")
+
+// Drains any Readable into one buffer for assertions.
+const collect = async (stream: NodeJS.ReadableStream): Promise<Buffer> => {
+  const chunks: Buffer[] = []
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk))
+  return Buffer.concat(chunks)
+}
+
+const PNG_BYTES = Buffer.concat([
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  randomBytes(128),
+])
 
 // Every file below the given dir, deepest path first (sorted for determinism).
 const listFiles = async (dir: string): Promise<string[]> => {
@@ -202,5 +214,75 @@ describe("CasObjectStore", () => {
     expect(stored.mimeType).toBe("application/octet-stream")
     expect(stored.size).toBe(0)
     expect(await listFiles(tmpDir)).toEqual([])
+  })
+
+  it("open() returns path, size and magic-derived mime for a stored object", async () => {
+    const stored = await store.store(truncatableSource([PNG_BYTES]), 0)
+
+    const file = await store.open(stored.id)
+
+    expect(file.path).toBe(
+      join(originalsDir, stored.id.slice(0, 2), stored.id.slice(2, 4), `${stored.id}.png`),
+    )
+    expect(file.size).toBe(PNG_BYTES.length)
+    expect(file.mimeType).toBe("image/png")
+    expect(await collect(store.read(file, null))).toEqual(PNG_BYTES)
+  })
+
+  it("looks up by id extension-agnostically and re-sniffs mime from magic, not the name", async () => {
+    const stored = await store.store(truncatableSource([PNG_BYTES]), 0)
+    const shardDir = join(originalsDir, stored.id.slice(0, 2), stored.id.slice(2, 4))
+    const before = join(shardDir, `${stored.id}.png`)
+    const after = join(shardDir, `${stored.id}.txt`)
+    await rename(before, after)
+
+    const file = await store.open(stored.id)
+
+    expect(file.path).toBe(after)
+    expect(file.mimeType).toBe("image/png") // magic bytes, not the .txt extension
+    expect(file.size).toBe(PNG_BYTES.length)
+    expect(await collect(store.read(file, null))).toEqual(PNG_BYTES)
+  })
+
+  it("open() throws NotFoundError (404) for an absent id", async () => {
+    const missing = sha256(Buffer.from("this was never stored"))
+    await expect(store.open(missing)).rejects.toMatchObject({ statusCode: 404 })
+  })
+
+  it("open() throws NotFoundError (404) when the shard exists but no entry matches the id", async () => {
+    const stored = await store.store(truncatableSource([PNG_BYTES]), 0)
+    // Same shard dir as the stored object, but a different (absent) id.
+    const ghost = stored.id.slice(0, 4) + "0".repeat(60)
+    await expect(store.open(ghost)).rejects.toMatchObject({ statusCode: 404 })
+    expect(await listFiles(originalsDir)).toHaveLength(1) // nothing was removed
+  })
+
+  it("read() streams the whole file when the range is null", async () => {
+    const bytes = randomBytes(4096)
+    const stored = await store.store(truncatableSource([bytes]), 0)
+    const file = await store.open(stored.id)
+
+    expect(await collect(store.read(file, null))).toEqual(bytes)
+  })
+
+  it("read() slices an inclusive byte window exactly", async () => {
+    const bytes = randomBytes(4096)
+    const stored = await store.store(truncatableSource([bytes]), 0)
+    const file = await store.open(stored.id)
+
+    const sliced = await collect(store.read(file, { start: 7, end: 22 }))
+
+    expect(sliced.length).toBe(22 - 7 + 1)
+    expect(sliced.equals(bytes.subarray(7, 23))).toBe(true)
+  })
+
+  it("read() honors whole-file windows and single-byte windows", async () => {
+    const bytes = randomBytes(64)
+    const stored = await store.store(truncatableSource([bytes]), 0)
+    const file = await store.open(stored.id)
+
+    expect(await collect(store.read(file, { start: 0, end: bytes.length - 1 }))).toEqual(bytes)
+    expect(await collect(store.read(file, { start: 0, end: 0 }))).toEqual(bytes.subarray(0, 1))
+    expect(await collect(store.read(file, { start: 63, end: 63 }))).toEqual(bytes.subarray(63, 64))
   })
 })

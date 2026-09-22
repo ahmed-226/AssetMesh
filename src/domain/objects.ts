@@ -1,8 +1,21 @@
 import type { Readable } from "node:stream"
+import { BadRequestError } from "./errors.js"
+import type { ByteRange } from "./range.js"
 
 // Busboy marks a file stream `truncated` when the configured fileSize limit
 // was hit mid-upload. The store treats that like an oversize payload.
 export type ReadableSource = Readable & { truncated?: boolean }
+
+export const HASH_PATTERN = /^[a-f0-9]{64}$/
+
+// Non-negotiables rule: never build a path from user input without checking the
+// id first. This is the single gate for every id that arrives from a URL.
+export const validateHash = (id: string): string => {
+  if (!HASH_PATTERN.test(id)) {
+    throw new BadRequestError(`invalid id '${id}' — expected a 64-char lowercase hex sha256`)
+  }
+  return id
+}
 
 export interface StoredObject {
   id: string
@@ -11,6 +24,14 @@ export interface StoredObject {
   size: number
 }
 
+export interface StoredFile {
+  path: string
+  size: number
+  mimeType: string
+}
+
 export interface ObjectRepository {
   store(source: ReadableSource, maxBytes: number): Promise<StoredObject>
+  open(id: string): Promise<StoredFile>
+  read(file: StoredFile, range: ByteRange | null): Readable
 }

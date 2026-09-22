@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto"
-import { createWriteStream } from "node:fs"
-import { access, mkdir, rename, rm } from "node:fs/promises"
+import { createReadStream, createWriteStream } from "node:fs"
+import { access, mkdir, open as openFile, readdir, rename, rm, stat } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import type { Readable } from "node:stream"
 import { pipeline } from "node:stream/promises"
-import { PayloadTooLargeError } from "../../domain/errors.js"
-import type { ObjectRepository, ReadableSource, StoredObject } from "../../domain/objects.js"
+import { NotFoundError, PayloadTooLargeError } from "../../domain/errors.js"
+import type { ObjectRepository, ReadableSource, StoredFile, StoredObject } from "../../domain/objects.js"
+import { validateHash } from "../../domain/objects.js"
+import type { ByteRange } from "../../domain/range.js"
 import { HashingWritable } from "./hashing-writable.js"
 import { sniffFormat } from "./magic.js"
 
@@ -16,6 +19,9 @@ const exists = async (path: string): Promise<boolean> => {
     return false
   }
 }
+
+const isEnoent = (err: unknown): boolean =>
+  err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT"
 
 // Content-addressable store: bytes are streamed to a temp file while being
 // hashed; the digest then becomes the final path (atomic rename). Same bytes
@@ -49,6 +55,47 @@ export class CasObjectStore implements ObjectRepository {
     } catch (err) {
       await rm(tmpPath, { force: true })
       throw err
+    }
+  }
+
+  // Lookup by id ignores the extension: the shard dir may hold <id>.<ext> for
+  // whatever extension the magic bytes imply. List and match the id prefix.
+  async open(id: string): Promise<StoredFile> {
+    validateHash(id) // defense-in-depth: never build a path from unvalidated input
+    const path = await this.findPath(id)
+    if (path === null) throw new NotFoundError(`no object with id '${id}'`)
+    const { size } = await stat(path)
+    return { path, size, mimeType: await this.sniffMime(path) }
+  }
+
+  read(file: StoredFile, range: ByteRange | null): Readable {
+    return createReadStream(file.path, range === null ? undefined : { start: range.start, end: range.end })
+  }
+
+  private async findPath(id: string): Promise<string | null> {
+    const shardDir = join(this.originalsDir, id.slice(0, 2), id.slice(2, 4))
+    let entries: string[]
+    try {
+      entries = await readdir(shardDir)
+    } catch (err) {
+      // Only a missing shard means "no object"; other failures (EACCES…) are
+      // real errors and must surface as 500, not 404.
+      if (isEnoent(err)) return null
+      throw err
+    }
+    const match = entries.find((entry) => entry.startsWith(`${id}.`))
+    return match === undefined ? null : join(shardDir, match)
+  }
+
+  // MIME on download is re-derived from the magic bytes, never the extension.
+  private async sniffMime(path: string): Promise<string> {
+    const handle = await openFile(path, "r")
+    try {
+      const head = Buffer.alloc(16) // allow-buffer: magic head only, not payload
+      const { bytesRead } = await handle.read(head, 0, head.length, 0)
+      return sniffFormat(head.subarray(0, bytesRead)).mimeType
+    } finally {
+      await handle.close()
     }
   }
 }

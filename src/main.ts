@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
+import { FetchService } from "./application/fetch-service.js"
 import { UploadService } from "./application/upload-service.js"
 import { loadConfig } from "./config/config.js"
 import type { Config } from "./config/config.js"
@@ -28,7 +29,8 @@ const main = async (): Promise<void> => {
 
   const objects = new CasObjectStore(originalsDir, tmpDir)
   const uploads = new UploadService(objects, config.maxUploadSizeBytes)
-  const app = createApp(config, uploads)
+  const fetches = new FetchService(objects)
+  const app = createApp(config, uploads, fetches)
 
   const server = app.listen(config.port, () => {
     console.log(`AssetMesh ready on http://localhost:${config.port}`)

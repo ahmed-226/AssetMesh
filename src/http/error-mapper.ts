@@ -10,6 +10,12 @@ export const errorMapper = (
   next: NextFunction,
 ): void => {
   if (next === undefined) return
+  if (res.headersSent || res.destroyed) {
+    // A streamed response already started (or the client is gone); too late to
+    // change status or write a JSON body.
+    res.destroy()
+    return
+  }
   if (err instanceof AppError) {
     res.status(err.statusCode).json({ error: err.message })
     return
