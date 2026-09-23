@@ -1,0 +1,28 @@
+services:
+  assetmesh:
+    build: .
+    image: assetmesh:latest
+    container_name: assetmesh
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      STORAGE_DIR: /var/assetmesh/data
+      MAX_UPLOAD_SIZE_MB: "50"
+      CACHE_LIMIT_GB: "5"
+      WORKER_POOL_SIZE: "4"
+    volumes:
+      # Only ./data is persistent — the container itself is disposable.
+      - ./data:/var/assetmesh/data
+    restart: unless-stopped
+    healthcheck:
+      # node:22-slim has no curl; fetch() is already in the image.
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch("http://localhost:3000/health").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s

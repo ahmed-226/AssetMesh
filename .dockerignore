@@ -1,0 +1,12 @@
+node_modules
+dist
+data
+.git
+.env
+.env.*
+docs
+tests
+*.log
+.opencode
+AGENTS.md
+opencode.json
