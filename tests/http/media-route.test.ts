@@ -7,11 +7,14 @@ import { join } from "node:path"
 import { Readable } from "node:stream"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { FetchService } from "../../src/application/fetch-service.js"
+import { PurgeService } from "../../src/application/purge-service.js"
 import type { TransformService } from "../../src/application/transform-service.js"
 import { UploadService } from "../../src/application/upload-service.js"
 import type { Config } from "../../src/config/config.js"
 import type { ObjectRepository, ReadableSource } from "../../src/domain/objects.js"
 import { createApp } from "../../src/http/app.js"
+import { DiskCacheStore } from "../../src/infrastructure/cache/disk-cache-store.js"
+import { LruIndex } from "../../src/infrastructure/cache/lru-index.js"
 import { CasObjectStore } from "../../src/infrastructure/storage/cas-object-store.js"
 
 const sha256 = (b: Buffer): string => createHash("sha256").update(b).digest("hex")
@@ -63,6 +66,7 @@ const start = async (
     },
     open: (id) => underlying.open(id),
     read: (file, range) => underlying.read(file, range),
+    delete: (id) => underlying.delete(id),
   }
   const transforms = opts.transforms ?? { resolve: vi.fn() }
   const uploads = new UploadService(repo, config.maxUploadSizeBytes)
@@ -71,7 +75,9 @@ const start = async (
     transforms as unknown as TransformService,
     ["jpg", "png", "webp", "avif"],
   )
-  const app = createApp(config, uploads, fetches)
+  const cache = new DiskCacheStore(join(root, "cache"))
+  const purges = new PurgeService(repo, cache, new LruIndex(join(root, "cache", "index.json")))
+  const app = createApp(config, uploads, fetches, purges)
   const server = app.listen(0)
   servers.push(server)
   await once(server, "listening")

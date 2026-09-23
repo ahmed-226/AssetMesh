@@ -73,6 +73,17 @@ export class CasObjectStore implements ObjectRepository {
     return createReadStream(file.path, range === null ? undefined : { start: range.start, end: range.end })
   }
 
+  // Purge an original by id. `force` makes a racing/duplicate delete a no-op;
+  // the bool only reports whether THIS call actually unlinked a file, so
+  // repeated DELETEs stay idempotent (204 either way).
+  async delete(id: string): Promise<boolean> {
+    validateHash(id) // defense-in-depth: never build a path from unvalidated input
+    const path = await this.findPath(id)
+    if (path === null) return false
+    await rm(path, { force: true })
+    return true
+  }
+
   private async findPath(id: string): Promise<string | null> {
     const shardDir = join(this.originalsDir, id.slice(0, 2), id.slice(2, 4))
     let entries: string[]

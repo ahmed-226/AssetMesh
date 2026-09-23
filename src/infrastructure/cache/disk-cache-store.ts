@@ -17,6 +17,12 @@ const exists = async (path: string): Promise<boolean> => {
 const isEnoent = (err: unknown): boolean =>
   err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT"
 
+// Shape every cache basename must match: a 64-hex id, optional w/h/q segments,
+// then a short alphanumeric extension. Verified here (single choke point) so a
+// corrupt/hand-forged key can never address a path outside the cache tree.
+export const isCacheBasename = (basename: string): boolean =>
+  /^[a-f0-9]{64}(?:_[whq]\d+)*\.[a-z0-9]{2,5}$/.test(basename)
+
 // Disk tier of the variant cache (data/cache/ab/cd/<key>). It mirrors the CAS
 // sharding so the M4 GC can bound its scan to 2/2-sharded directories. There's
 // no LRU bookkeeping yet — that's M4; here "cache" is existence + streaming.
@@ -34,7 +40,7 @@ export class DiskCacheStore {
   // validated here (single choke point) so a corrupt index key can never
   // escape the cache tree via join().
   pathForBasename(basename: string): string {
-    if (!/^[a-f0-9]{64}(?:_[whq]\d+)*\.[a-z0-9]{2,5}$/.test(basename)) {
+    if (!isCacheBasename(basename)) {
       throw new Error(`refusing to address invalid cache key '${basename}'`)
     }
     return join(this.cacheDir, basename.slice(0, 2), basename.slice(2, 4), basename)
@@ -66,6 +72,21 @@ export class DiskCacheStore {
   // index and disk can drift without failing the GC tick.
   async remove(basename: string): Promise<void> {
     await rm(this.pathForBasename(basename), { force: true })
+  }
+
+  // All variant basenames derived from one original id (`<id>_…`). Variants
+  // share the id's shard, so this is a single readdir — used by purge. Missing
+  // shard (no variants ever generated) is just an empty list.
+  async listByPrefix(id: string): Promise<string[]> {
+    const shardDir = join(this.cacheDir, id.slice(0, 2), id.slice(2, 4))
+    let entries: string[]
+    try {
+      entries = await readdir(shardDir)
+    } catch (err) {
+      if (isEnoent(err)) return []
+      throw err
+    }
+    return entries.filter((name) => name.startsWith(`${id}_`))
   }
 
   // Lists every cached variant with size + mtime — used to rebuild the LRU

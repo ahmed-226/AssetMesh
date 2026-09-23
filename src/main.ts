@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises"
 import { join } from "node:path"
 import { FetchService } from "./application/fetch-service.js"
+import { PurgeService } from "./application/purge-service.js"
 import { TransformService } from "./application/transform-service.js"
 import { UploadService } from "./application/upload-service.js"
 import { loadConfig } from "./config/config.js"
@@ -57,9 +58,10 @@ const main = async (): Promise<void> => {
   })
   const transforms = new TransformService(cache, index, pool, tmpDir)
   const fetches = new FetchService(objects, transforms, config.allowedFormats)
+  const purges = new PurgeService(objects, cache, index)
   const gc = new GarbageCollector({ cache, index, limitBytes: config.cacheLimitBytes, intervalMs: config.gcIntervalMs })
   gc.start()
-  const app = createApp(config, uploads, fetches)
+  const app = createApp(config, uploads, fetches, purges)
 
   const server = app.listen(config.port, () => {
     console.log(`AssetMesh ready on http://localhost:${config.port}`)

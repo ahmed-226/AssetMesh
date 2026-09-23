@@ -35,4 +35,7 @@ export interface ObjectRepository {
   store(source: ReadableSource, maxBytes: number): Promise<StoredObject>
   open(id: string): Promise<StoredFile>
   read(file: StoredFile, range: ByteRange | null): Readable
+  // Purge: unlink the original blob. Returns whether a file was actually
+  // removed — a missing id is a no-op (delete is idempotent), not an error.
+  delete(id: string): Promise<boolean>
 }
