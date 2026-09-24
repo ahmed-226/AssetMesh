@@ -37,7 +37,18 @@ export class WorkerPoolProcessor {
     if (this.pool.queueSize >= this.maxQueue) {
       throw new ServiceUnavailableError("image worker queue is full")
     }
-    return (await this.pool.run(request)) as TransformOutcome
+    try {
+      return (await this.pool.run(request)) as TransformOutcome
+    } catch (err) {
+      // piscina rejects at admission if the queue filled between our pre-check
+      // and the run — surface that as the same bounded-queue 503, never a 500.
+      // The pinned piscina 5.3.2 messages are "Task queue is at limit" and
+      // "No task queue available and all Workers are busy".
+      if (err instanceof Error && /task queue is at limit|no task queue available/i.test(err.message)) {
+        throw new ServiceUnavailableError("image worker queue is full")
+      }
+      throw err
+    }
   }
 
   async close(): Promise<void> {

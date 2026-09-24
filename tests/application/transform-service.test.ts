@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto"
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Readable } from "node:stream"
+import { Readable } from "node:stream"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { TransformService } from "../../src/application/transform-service.js"
 import { CacheKey } from "../../src/domain/cache-key.js"
@@ -61,6 +61,23 @@ const makePool = (impl: (req: TransformRequest) => Promise<TransformOutcome>): F
 })
 
 const asPool = (pool: FakePool): WorkerPoolProcessor => pool as unknown as WorkerPoolProcessor
+
+// Programmable stand-in for DiskCacheStore: open() is scripted per call, so a
+// GC-eviction race (the file vanishing between stat and read) is deterministic
+// instead of a timed sleep. Only open/store are used by the service.
+interface FakeCache {
+  open: ReturnType<typeof vi.fn>
+  store: ReturnType<typeof vi.fn>
+}
+
+const asCache = (cache: FakeCache): DiskCacheStore => cache as unknown as DiskCacheStore
+
+// An ENOENT as fs reports it — plain Error with the errno code attached.
+const enoent = (): NodeJS.ErrnoException => {
+  const err = new Error("no such file or directory") as NodeJS.ErrnoException
+  err.code = "ENOENT"
+  return err
+}
 
 describe("TransformService", () => {
   let root: string
@@ -205,5 +222,55 @@ describe("TransformService", () => {
     expect(pool.transform.mock.calls[0]?.[0]).toMatchObject({ fmt: "png" })
     expect(result.headers["Content-Type"]).toBe("image/png")
     await readAll(result.stream)
+  })
+
+  it("treats a cache.open() ENOENT (GC race) as a miss — generates and serves instead of crashing", async () => {
+    const racedVariant = randomBytes(600)
+    let opens = 0
+    cache = asCache({
+      open: vi.fn(async () => {
+        opens += 1
+        if (opens === 1) throw enoent() // eviction won between the check and the read
+        return { stream: Readable.from([racedVariant]), size: racedVariant.length }
+      }),
+      store: vi.fn(async () => {}),
+    })
+    service = new TransformService(cache, index, asPool(pool), tmpDir)
+    const options = parse({ w: "300", fmt: "webp" })
+
+    const result = await service.resolve(ID, FILE, options)
+
+    // never a 500: the ENOENT read as a miss, the pool generated, serve() touched the index
+    expect(pool.transform).toHaveBeenCalledTimes(1)
+    expect(result.headers["Content-Length"]).toBe(String(racedVariant.length))
+    expect(await readAll(result.stream)).toEqual(racedVariant)
+    const key = CacheKey.create(ID, options, "webp")
+    expect(index.count).toBe(1)
+    expect(index.totalSize).toBe(racedVariant.length)
+    expect(index.lastAccessedAt(key.basename)).toBeGreaterThan(0)
+  })
+
+  it("regenerates once when the variant is evicted again between generation and open", async () => {
+    const secondReadVariant = randomBytes(813)
+    let opens = 0
+    cache = asCache({
+      open: vi.fn(async () => {
+        opens += 1
+        // open #2 failing means GC evicted the freshly generated variant
+        if (opens <= 2) throw enoent()
+        return { stream: Readable.from([secondReadVariant]), size: secondReadVariant.length }
+      }),
+      store: vi.fn(async () => {}),
+    })
+    service = new TransformService(cache, index, asPool(pool), tmpDir)
+
+    const result = await service.resolve(ID, FILE, parse({ w: "300" }))
+
+    // generated twice, served from the second successful open — no 500
+    expect(pool.transform).toHaveBeenCalledTimes(2)
+    expect(result.headers["Content-Length"]).toBe(String(secondReadVariant.length))
+    expect(await readAll(result.stream)).toEqual(secondReadVariant)
+    expect(index.count).toBe(1)
+    expect(index.totalSize).toBe(secondReadVariant.length)
   })
 })

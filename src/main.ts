@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises"
+import { mkdir, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { FetchService } from "./application/fetch-service.js"
 import { PurgeService } from "./application/purge-service.js"
@@ -41,6 +41,15 @@ const main = async (): Promise<void> => {
   const cacheDir = join(config.storageDir, "cache")
   const cache = new DiskCacheStore(cacheDir)
   const index = new LruIndex(join(cacheDir, "index.json"))
+  // A hard crash between index.save()'s writeFile and rename can orphan a
+  // `.index-<uuid>.tmp` at the cache root; the GC's walk only descends shard
+  // dirs, so sweep such leftovers at boot.
+  const cacheRootEntries = await readdir(cacheDir).catch(() => [] as string[])
+  await Promise.all(
+    cacheRootEntries
+      .filter((name) => /^\.index-.+\.tmp$/.test(name))
+      .map((name) => rm(join(cacheDir, name), { force: true })),
+  )
   // Boot reconciliation: if index.json parsed, absorb any files written after
   // its last save (crash between store() and save()); if missing/corrupt,
   // rebuild the whole index from disk (mtime = access order). Either way the

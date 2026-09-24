@@ -36,16 +36,40 @@ export class TransformService {
     const fmt = options.fmt ?? file.extension
     const key = CacheKey.create(id, options, fmt)
 
-    if (await this.cache.exists(key)) {
-      const { stream, size } = await this.cache.open(key)
-      this.index.touch(key.basename, size)
-      return { headers: this.variantHeaders(fmt, size), stream }
-    }
+    // A single open() (instead of exists→open) keeps the hit/miss decision
+    // atomic: ENOENT reads as a miss, and a GC eviction racing in between can
+    // no longer 500 a request — it simply regenerates.
+    const hit = await this.openOrMiss(key)
+    if (hit !== null) return this.serve(key, hit, fmt)
 
     await this.generate(key, file.path, options, fmt)
-    const { stream, size } = await this.cache.open(key)
-    this.index.touch(key.basename, size)
-    return { headers: this.variantHeaders(fmt, size), stream }
+    const fresh = await this.openOrMiss(key)
+    if (fresh !== null) return this.serve(key, fresh, fmt)
+
+    // Evicted again between generation and open (cache is disposable):
+    // regenerate once; if it still isn't there something is actually wrong.
+    await this.generate(key, file.path, options, fmt)
+    const again = await this.openOrMiss(key)
+    if (again === null) throw new Error(`variant '${key.basename}' missing right after generation`)
+    return this.serve(key, again, fmt)
+  }
+
+  private async openOrMiss(key: CacheKey): Promise<{ stream: Readable; size: number } | null> {
+    try {
+      return await this.cache.open(key)
+    } catch (err) {
+      if (err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT") return null
+      throw err
+    }
+  }
+
+  private serve(
+    key: CacheKey,
+    loaded: { stream: Readable; size: number },
+    fmt: string,
+  ): VariantResult {
+    this.index.touch(key.basename, loaded.size)
+    return { headers: this.variantHeaders(fmt, loaded.size), stream: loaded.stream }
   }
 
   private variantHeaders(fmt: string, size: number): Record<string, string> {

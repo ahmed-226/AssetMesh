@@ -50,9 +50,10 @@ export class DiskCacheStore {
     return exists(this.pathFor(key))
   }
 
-  // Streams a variant that exists() confirmed. The stream is opened lazily, so
-  // a concurrent GC deleting the file (M4) is fine on Linux — reads continue on
-  // the open fd.
+  // Streams a variant, throwing ENOENT when it is absent — callers treat that
+  // as a miss (the cache is disposable) rather than an error. The stream is
+  // opened lazily, so a concurrent GC deleting the file (M4) is fine on Linux —
+  // reads continue on the open fd.
   async open(key: CacheKey): Promise<{ stream: Readable; size: number }> {
     const path = this.pathFor(key)
     const { size } = await stat(path)
