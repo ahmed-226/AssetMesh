@@ -8,9 +8,9 @@ services:
     environment:
       PORT: "3000"
       STORAGE_DIR: /var/assetmesh/data
-      MAX_UPLOAD_SIZE_MB: "50"
+      MAX_UPLOAD_SIZE_MB: "${MAX_UPLOAD_SIZE_MB:-50}"
       CACHE_LIMIT_GB: "5"
-      WORKER_POOL_SIZE: "4"
+      WORKER_POOL_SIZE: "${WORKER_POOL_SIZE:-4}"
     volumes:
       # Only ./data is persistent — the container itself is disposable.
       - ./data:/var/assetmesh/data

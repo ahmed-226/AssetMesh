@@ -8,7 +8,7 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   prettier,
   {
-    files: ["src/**/*.ts", "tests/**/*.ts"],
+    files: ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"],
     rules: {
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
     },

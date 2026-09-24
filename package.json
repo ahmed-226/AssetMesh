@@ -12,8 +12,9 @@
     "build": "tsc",
     "start": "node dist/main.js",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "lint": "eslint src tests"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json --noEmit",
+    "lint": "eslint src tests scripts",
+    "loadtest": "tsx scripts/load-test.ts"
   },
   "dependencies": {
     "busboy": "^1.6.0",
